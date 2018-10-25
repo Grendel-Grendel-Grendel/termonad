@@ -1,11 +1,9 @@
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE StandaloneDeriving #-}
 
 module Termonad.Types where
 
 import Termonad.Prelude
 
-import Control.Lens ((&), (.~), (^.), firstOf, makeLensesFor)
 import Data.Unique (Unique, hashUnique, newUnique)
 import GI.Gtk
   ( Application
@@ -20,12 +18,11 @@ import GI.Gtk
   , notebookGetNPages
   )
 import GI.Pango (FontDescription)
-import GI.Vte (Terminal)
+import GI.Vte (Terminal, CursorBlinkMode(CursorBlinkModeOn))
 import Text.Pretty.Simple (pPrint)
 import Text.Show (Show(showsPrec), ShowS, showParen, showString)
 
-import Termonad.Config (TMConfig)
-import Termonad.FocusList (FocusList, emptyFL, focusItemGetter, singletonFL, getFLFocusItem, focusListLen)
+import Termonad.FocusList (FocusList, emptyFL, singletonFL, getFLFocusItem, focusListLen)
 import Termonad.Gtk (widgetEq)
 
 data TMTerm = TMTerm
@@ -49,14 +46,6 @@ instance Show TMTerm where
       showsPrec (d + 1) (hashUnique unique) .
       showString "}"
 
-$(makeLensesFor
-    [ ("term", "lensTerm")
-    , ("pid", "lensPid")
-    , ("unique", "lensUnique")
-    ]
-    ''TMTerm
- )
-
 data TMNotebookTab = TMNotebookTab
   { tmNotebookTabTermContainer :: !ScrolledWindow
   , tmNotebookTabTerm :: !TMTerm
@@ -78,14 +67,6 @@ instance Show TMNotebookTab where
       showString "(GI.GTK.Label)" .
       showString "}"
 
-$(makeLensesFor
-    [ ("tmNotebookTabTermContainer", "lensTMNotebookTabTermContainer")
-    , ("tmNotebookTabTerm", "lensTMNotebookTabTerm")
-    , ("tmNotebookTabLabel", "lensTMNotebookTabLabel")
-    ]
-    ''TMNotebookTab
- )
-
 data TMNotebook = TMNotebook
   { tmNotebook :: !Notebook
   , tmNotebookTabs :: !(FocusList TMNotebookTab)
@@ -102,13 +83,6 @@ instance Show TMNotebook where
       showString "tmNotebookTabs = " .
       showsPrec (d + 1) tmNotebookTabs .
       showString "}"
-
-$(makeLensesFor
-    [ ("tmNotebook", "lensTMNotebook")
-    , ("tmNotebookTabs", "lensTMNotebookTabs")
-    ]
-    ''TMNotebook
- )
 
 data UserRequestedExit
   = UserRequestedExit
@@ -153,17 +127,6 @@ instance Show TMState' where
       showString "tmStateUserReqExit = " .
       showsPrec (d + 1) tmStateUserReqExit .
       showString "}"
-
-$(makeLensesFor
-    [ ("tmStateApp", "lensTMStateApp")
-    , ("tmStateAppWin", "lensTMStateAppWin")
-    , ("tmStateNotebook", "lensTMStateNotebook")
-    , ("tmStateFontDesc", "lensTMStateFontDesc")
-    , ("tmStateConfig", "lensTMStateConfig")
-    , ("tmStateUserReqExit", "lensTMStateUserReqExit")
-    ]
-    ''TMState'
- )
 
 type TMState = MVar TMState'
 
@@ -263,22 +226,206 @@ traceShowMTMState mvarTMState = do
   tmState <- readMVar mvarTMState
   print tmState
 
+------------
+-- Config --
+------------
+
+-- | The font size for the Termonad terminal.  There are two ways to set the
+-- fontsize, corresponding to the two different ways to set the font size in
+-- the Pango font rendering library.
+--
+-- If you're not sure which to use, try 'FontSizePoints' first and see how it
+-- looks.  It should generally correspond to font sizes you are used to from
+-- other applications.
+data FontSize
+  = FontSizePoints Int
+    -- ^ This sets the font size based on \"points\".  The conversion between a
+    -- point and an actual size depends on the system configuration and the
+    -- output device.  The function 'GI.Pango.fontDescriptionSetSize' is used
+    -- to set the font size.  See the documentation for that function for more
+    -- info.
+  | FontSizeUnits Double
+    -- ^ This sets the font size based on \"device units\".  In general, this
+    -- can be thought of as one pixel.  The function
+    -- 'GI.Pango.fontDescriptionSetAbsoluteSize' is used to set the font size.
+    -- See the documentation for that function for more info.
+  deriving (Eq, Show)
+
+-- | The default 'FontSize' used if not specified.
+--
+-- >>> defaultFontSize
+-- FontSizePoints 12
+defaultFontSize :: FontSize
+defaultFontSize = FontSizePoints 12
+
+-- | Settings for the font to be used in Termonad.
+data FontConfig = FontConfig
+  { fontFamily :: !Text
+    -- ^ The font family to use.  Example: @"DejaVu Sans Mono"@ or @"Source Code Pro"@
+  , fontSize :: !FontSize
+    -- ^ The font size.
+  } deriving (Eq, Show)
+
+-- | The default 'FontConfig' to use if not specified.
+--
+-- >>> defaultFontConfig == FontConfig {fontFamily = "Monospace", fontSize = defaultFontSize}
+-- True
+defaultFontConfig :: FontConfig
+defaultFontConfig =
+  FontConfig
+    { fontFamily = "Monospace"
+    , fontSize = defaultFontSize
+    }
+
+-- | This data type represents an option that can either be 'Set' or 'Unset'.
+--
+-- This data type is used in situations where leaving an option unset results
+-- in a special state that is not representable by setting any specific value.
+--
+-- Examples of this include the 'cursorFgColour' and 'cursorBgColour' options
+-- supplied by the 'ColourConfig' @ConfigExtension@.  By default,
+-- 'cursorFgColour' and 'cursorBgColour' are both 'Unset'.  However, when
+-- 'cursorBgColour' is 'Set', 'cursorFgColour' defaults to the color of the text
+-- underneath.  There is no way to represent this by setting 'cursorFgColour'.
+data Option a = Unset | Set !a
+  deriving (Show, Read, Eq, Ord, Functor, Foldable)
+
+-- | Run a function over the value contained in an 'Option'. Return 'mempty'
+-- when 'Option' is 'Unset'.
+--
+-- >>> whenSet (Set [1,2,3]) (++ [4,5,6]) :: [Int]
+-- [1,2,3,4,5,6]
+-- >>> whenSet Unset (++ [4,5,6]) :: [Int]
+-- []
+whenSet :: Monoid m => Option a -> (a -> m) -> m
+whenSet = \case
+  Unset -> \_ -> mempty
+  Set x -> \f -> f x
+
+data ShowScrollbar
+  = ShowScrollbarNever
+  | ShowScrollbarAlways
+  | ShowScrollbarIfNeeded
+  deriving (Eq, Show)
+
+data ShowTabBar
+  = ShowTabBarNever
+  | ShowTabBarAlways
+  | ShowTabBarIfNeeded
+  deriving (Eq, Show)
+
+data ConfigOptions = ConfigOptions
+  { fontConfig :: !FontConfig
+  , showScrollbar :: !ShowScrollbar
+  , scrollbackLen :: !Integer
+  , confirmExit :: !Bool
+  , wordCharExceptions :: !Text
+  , showMenu :: !Bool
+  , showTabBar :: !ShowTabBar
+  , cursorBlinkMode :: !CursorBlinkMode
+  } deriving (Eq, Show)
+
+-- | The default 'ConfigOptions'.
+--
+-- >>> :{
+--   let defConfOpt =
+--         ConfigOptions
+--           { fontConfig = defaultFontConfig
+--           , showScrollbar = ShowScrollbarIfNeeded
+--           , scrollbackLen = 10000
+--           , confirmExit = True
+--           , wordCharExceptions = "-#%&+,./=?@\\_~\183:"
+--           , showMenu = True
+--           , showTabBar = ShowTabBarIfNeeded
+--           , cursorBlinkMode = CursorBlinkModeOn
+--           }
+--   in defaultConfigOptions == defConfOpt
+-- :}
+-- True
+defaultConfigOptions :: ConfigOptions
+defaultConfigOptions =
+  ConfigOptions
+    { fontConfig = defaultFontConfig
+    , showScrollbar = ShowScrollbarIfNeeded
+    , scrollbackLen = 10000
+    , confirmExit = True
+    , wordCharExceptions = "-#%&+,./=?@\\_~\183:"
+    , showMenu = True
+    , showTabBar = ShowTabBarIfNeeded
+    , cursorBlinkMode = CursorBlinkModeOn
+    }
+
+data TMConfig = TMConfig
+  { options :: !ConfigOptions
+  , hooks :: !ConfigHooks
+  } deriving Show
+
+-- | The default 'TMConfig'.
+--
+-- 'options' is 'defaultConfigOptions' and 'hooks' is 'defaultConfigHooks'.
+defaultTMConfig :: TMConfig
+defaultTMConfig =
+  TMConfig
+    { options = defaultConfigOptions
+    , hooks = defaultConfigHooks
+    }
+
+---------------------
+-- ConfigHooks --
+---------------------
+
+-- | Hooks into certain termonad operations and VTE events. Used to modify
+--   termonad's behaviour in order to implement new functionality. Fields should
+--   have sane @Semigroup@ and @Monoid@ instances so that config extensions can
+--   be combined uniformly and new hooks can be added without incident.
+data ConfigHooks = ConfigHooks {
+  -- | Produce an IO action to run on creation of new @Terminal@, given @TMState@
+  --   and the @Terminal@ in question.
+  createTermHook :: TMState -> Terminal -> IO ()
+}
+
+instance Show ConfigHooks where
+  showsPrec :: Int -> ConfigHooks -> ShowS
+  showsPrec _ _ =
+    showString "ConfigHooks {" .
+    showString "createTermHook = <function>" .
+    showString "}"
+
+-- | Default values for the 'ConfigHooks'.
+--
+-- - The default function for 'createTermHook' is 'defaultCreateTermHook'.
+defaultConfigHooks :: ConfigHooks
+defaultConfigHooks =
+  ConfigHooks
+    { createTermHook = defaultCreateTermHook
+    }
+
+-- | Default value for 'createTermHook'.  Does nothing.
+defaultCreateTermHook :: TMState -> Terminal -> IO ()
+defaultCreateTermHook _ _ = pure ()
+
+----------------
+-- Invariants --
+----------------
+
 data FocusNotSameErr
   = FocusListFocusExistsButNoNotebookTabWidget
   | NotebookTabWidgetDiffersFromFocusListFocus
   | NotebookTabWidgetExistsButNoFocusListFocus
   deriving Show
 
--- ^ The first 'Int' is the number of tabs in the actual GTK 'Notebook'.  The second 'Int' is the number of tabs in the 'FocusList'.
-data TabsDoNotMatch = TabLengthsDifferent Int Int
-                    | TabAtIndexDifferent Int -- ^ The tab at index 'Int' is different between the actual GTK 'Notebook' and the 'FocusList'.
-                    deriving Show
+data TabsDoNotMatch
+  = TabLengthsDifferent Int Int -- ^ The first 'Int' is the number of tabs in the
+                                -- actual GTK 'Notebook'.  The second 'Int' is
+                                -- the number of tabs in the 'FocusList'.
+  | TabAtIndexDifferent Int     -- ^ The tab at index 'Int' is different between
+                                -- the actual GTK 'Notebook' and the 'FocusList'.
+  deriving (Show)
 
 data TMStateInvariantErr
   = FocusNotSame FocusNotSameErr Int
   | TabsDoNotMatch TabsDoNotMatch
   deriving Show
-
 
 -- | Gather up the invariants for 'TMState' and return them as a list.
 --
@@ -337,21 +484,29 @@ invariantTMState' tmState =
                 TabsDoNotMatch $
                  TabLengthsDifferent noteLength focusListLength
 
+    -- Turns a FocusList and Notebook into two lists of widgets and compares each widget for equality
     invariantTabsAllMatch :: IO (Maybe TMStateInvariantErr)
     invariantTabsAllMatch = do
-  --Turns a FocusList and Notebook into two lists of widgets and compares each widget for equality
       let tmNote = tmNotebook $ tmStateNotebook tmState
           focusList = tmNotebookTabs $ tmStateNotebook tmState
           flList = fmap tmNotebookTabTermContainer $ toList focusList
       noteList <- notebookToList tmNote
       tabsMatch noteList flList
       where
-        tabsMatch :: (IsWidget a, IsWidget b) => [a] -> [b] -> IO (Maybe TMStateInvariantErr)
+        tabsMatch
+          :: forall a b
+           . (IsWidget a, IsWidget b)
+          => [a]
+          -> [b]
+          -> IO (Maybe TMStateInvariantErr)
         tabsMatch xs ys = foldr go (pure Nothing) (zip3 xs ys [0..])
           where
-            go (x, y, i) acc = widgetEq x y >>= (\z -> case z of
-                                                    True  -> acc
-                                                    False -> pure . Just $ TabsDoNotMatch (TabAtIndexDifferent i))
+            go :: (a, b, Int) -> IO (Maybe TMStateInvariantErr) -> IO (Maybe TMStateInvariantErr)
+            go (x, y, i) acc = do
+              isEq <- widgetEq x y
+              if isEq
+                then acc
+                else pure . Just $ TabsDoNotMatch (TabAtIndexDifferent i)
 
 -- | Check the invariants for 'TMState', and call 'fail' if we find that they
 -- have been violated.
@@ -374,28 +529,3 @@ pPrintTMState :: TMState -> IO ()
 pPrintTMState mvarTMState = do
   tmState <- readMVar mvarTMState
   pPrint tmState
-
-getFocusedTermFromState :: TMState -> IO (Maybe Terminal)
-getFocusedTermFromState mvarTMState = do
-  withMVar
-    mvarTMState
-    ( pure .
-      firstOf
-        ( lensTMStateNotebook .
-          lensTMNotebookTabs .
-          focusItemGetter .
-          traverse .
-          lensTMNotebookTabTerm .
-          lensTerm
-        )
-    )
-
-setUserRequestedExit :: TMState -> IO ()
-setUserRequestedExit mvarTMState = do
-  modifyMVar_ mvarTMState $ \tmState -> do
-    pure $ tmState & lensTMStateUserReqExit .~ UserRequestedExit
-
-getUserRequestedExit :: TMState -> IO UserRequestedExit
-getUserRequestedExit mvarTMState = do
-  tmState <- readMVar mvarTMState
-  pure $ tmState ^. lensTMStateUserReqExit

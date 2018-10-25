@@ -27,10 +27,13 @@ custom-setup
                    , Cabal
                    , cabal-doctest >=1.0.2 && <1.1
 
--- This flag builds the example code from the README.md file.  It is only used
--- for testing.  It should be enabled for CI.
-flag buildreadme
-  description: Build an executable from the example from the README.md file
+-- This flag builds the example code in the example-config/ directory, as well
+-- as the example from the README.md file.  It is only used for testing.  It
+-- should be enabled for CI.
+flag buildexamples
+  description: Build an executable from the examples in the example-config/
+               directory, as well as the example from the README.md file.  This
+               is normally only used for testing.
   default:     False
 
 library
@@ -38,20 +41,25 @@ library
   exposed-modules:     Termonad
                      , Termonad.App
                      , Termonad.Config
+                     , Termonad.Config.Colour
+                     , Termonad.Config.Vec
                      , Termonad.FocusList
                      , Termonad.Gtk
                      , Termonad.Keys
+                     , Termonad.Lenses
                      , Termonad.Prelude
                      , Termonad.Term
                      , Termonad.Types
                      , Termonad.XML
   other-modules:       Paths_termonad
   build-depends:       base >= 4.7 && < 5
+                     , adjunctions
                      , classy-prelude
                      , colour
                      , constraints
                      , data-default
                      , directory >= 1.3.1.0
+                     , distributive
                      , dyre
                      , filepath
                      , gi-gdk
@@ -60,34 +68,47 @@ library
                      , gi-gtk >= 3.0.24
                      , gi-pango
                      , gi-vte >= 2.91.19
-                     , haskell-gi-base
+                     , haskell-gi-base >= 0.21.2
                      , lens
                      , pretty-simple
                      , QuickCheck
+                     , singletons
                      , xml-conduit
                      , xml-html-qq
   default-language:    Haskell2010
   ghc-options:         -Wall -Wincomplete-uni-patterns -Wincomplete-record-updates
   default-extensions:  DataKinds
+                     , DefaultSignatures
+                     , DeriveAnyClass
+                     , DeriveFoldable
+                     , DeriveFunctor
+                     , DerivingStrategies
+                     , EmptyCase
+                     , ExistentialQuantification
+                     , FlexibleContexts
+                     , FlexibleInstances
                      , GADTs
                      , GeneralizedNewtypeDeriving
                      , InstanceSigs
                      , KindSignatures
+                     , LambdaCase
+                     , MultiParamTypeClasses
                      , NamedFieldPuns
                      , NoImplicitPrelude
-                     , OverloadedStrings
                      , OverloadedLabels
                      , OverloadedLists
+                     , OverloadedStrings
                      , PatternSynonyms
                      , PolyKinds
                      , RankNTypes
                      , RecordWildCards
                      , ScopedTypeVariables
+                     , StandaloneDeriving
                      , TypeApplications
                      , TypeFamilies
                      , TypeOperators
-                     , DeriveFunctor
   other-extensions:    TemplateHaskell
+                     , UndecidableInstances
   pkgconfig-depends:   gtk+-3.0
 
 executable termonad
@@ -147,18 +168,31 @@ test-suite termonad-test
   other-extensions:    TemplateHaskell
 
 executable termonad-readme
-  main-is:        README.lhs
-  hs-source-dirs: test/readme
-  build-depends:  base
-                  , markdown-unlit
-                  , termonad
-                  , colour
-  ghc-options: -pgmL markdown-unlit
+  main-is:             README.lhs
+  hs-source-dirs:      test/readme
+  build-depends:       base
+                     , markdown-unlit
+                     , termonad
+                     , colour
+  ghc-options:         -pgmL markdown-unlit
+  default-language:    Haskell2010
 
-  if flag(buildreadme)
-    buildable:       True
+  if flag(buildexamples)
+    buildable:         True
   else
-    buildable:       False
+    buildable:         False
+
+executable termonad-example-colour-extension
+  main-is:             example-config/ExampleColourExtension.hs
+  build-depends:       base
+                     , termonad
+                     , colour
+  default-language:    Haskell2010
+
+  if flag(buildexamples)
+    buildable:         True
+  else
+    buildable:         False
 
 source-repository head
   type:     git

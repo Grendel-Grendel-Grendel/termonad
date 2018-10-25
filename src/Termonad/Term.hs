@@ -48,8 +48,10 @@ import GI.Gtk
   , noAdjustment
   , notebookAppendPage
   , notebookDetachTab
+  , notebookGetNPages
   , notebookPageNum
   , notebookSetCurrentPage
+  , notebookSetShowTabs
   , notebookSetTabReorderable
   , onButtonClicked
   , onWidgetKeyPressEvent
@@ -59,23 +61,22 @@ import GI.Gtk
   , widgetDestroy
   , widgetGrabFocus
   , widgetSetCanFocus
+  , widgetSetFocusOnClick
   , widgetSetHalign
   , widgetSetHexpand
   , widgetShow
+  , windowSetFocus
   , windowSetTransientFor
   )
 import GI.Pango (EllipsizeMode(EllipsizeModeMiddle))
 import GI.Vte
-  ( CursorBlinkMode(CursorBlinkModeOn)
-  , PtyFlags(PtyFlagsDefault)
+  ( PtyFlags(PtyFlagsDefault)
   , Terminal
   , onTerminalChildExited
   , onTerminalWindowTitleChanged
   , terminalGetWindowTitle
   , terminalNew
   , terminalSetCursorBlinkMode
-  , terminalSetColors
-  , terminalSetColorCursor
   , terminalSetFont
   , terminalSetScrollbackLines
   , terminalSpawnSync
@@ -83,36 +84,41 @@ import GI.Vte
   )
 import System.FilePath ((</>))
 import System.Directory (getSymbolicLinkTarget)
+import System.Environment (lookupEnv)
 
-import Termonad.Config
-  ( ShowScrollbar(..)
-  , TMConfig(scrollbackLen, wordCharExceptions, colourConfig)
-  , ColourConfig(..)
-  , lensShowScrollbar
-  , lensConfirmExit
-  )
 import Termonad.FocusList (appendFL, deleteFL, getFLFocusItem)
-import Termonad.Types
-  ( TMNotebookTab
-  , TMState
-  , TMState'(TMState, tmStateConfig, tmStateFontDesc, tmStateNotebook)
-  , TMTerm
-  , createTMNotebookTab
-  , lensTerm
+import Termonad.Lenses
+  ( lensConfirmExit
+  , lensOptions
+  , lensShowScrollbar
+  , lensShowTabBar
   , lensTMNotebookTabLabel
-  , lensTMNotebookTabs
   , lensTMNotebookTabTerm
   , lensTMNotebookTabTermContainer
+  , lensTMNotebookTabs
   , lensTMStateApp
   , lensTMStateConfig
   , lensTMStateNotebook
+  , lensTerm
+  )
+import Termonad.Types
+  ( ConfigHooks(createTermHook)
+  , ConfigOptions(scrollbackLen, wordCharExceptions, cursorBlinkMode)
+  , ShowScrollbar(..)
+  , ShowTabBar(..)
+  , TMConfig(hooks, options)
+  , TMNotebookTab
+  , TMState
+  , TMState'(TMState, tmStateAppWin, tmStateConfig, tmStateFontDesc, tmStateNotebook)
+  , TMTerm
+  , assertInvariantTMState
+  , createTMNotebookTab
   , newTMTerm
   , pid
   , tmNotebook
-  , tmNotebookTabs
   , tmNotebookTabTerm
   , tmNotebookTabTermContainer
-  , assertInvariantTMState
+  , tmNotebookTabs
   )
 
 focusTerm :: Int -> TMState -> IO ()
@@ -135,7 +141,7 @@ termExitFocused mvarTMState = do
 termClose :: TMNotebookTab -> TMState -> IO ()
 termClose tab mvarTMState = do
   tmState <- readMVar mvarTMState
-  let confirm = tmState ^. lensTMStateConfig ^. lensConfirmExit
+  let confirm = tmState ^. lensTMStateConfig . lensOptions . lensConfirmExit
       close = if confirm then termExitWithConfirmation else termExit
   close tab mvarTMState
 
@@ -201,7 +207,7 @@ relabelTab :: Notebook -> Label -> ScrolledWindow -> Terminal -> IO ()
 relabelTab notebook label scrolledWin term' = do
   pageNum <- notebookPageNum notebook scrolledWin
   maybeTitle <- terminalGetWindowTitle term'
-  let title = fromMaybe "bash" maybeTitle
+  let title = fromMaybe "shell" maybeTitle
   labelSetLabel label $ tshow (pageNum + 1) <> ". " <> title
 
 showScrollbarToPolicy :: ShowScrollbar -> PolicyType
@@ -212,7 +218,7 @@ showScrollbarToPolicy ShowScrollbarAlways = PolicyTypeAlways
 createScrolledWin :: TMState -> IO ScrolledWindow
 createScrolledWin mvarTMState = do
   tmState <- readMVar mvarTMState
-  let showScrollbarVal = tmState ^. lensTMStateConfig . lensShowScrollbar
+  let showScrollbarVal = tmState ^. lensTMStateConfig . lensOptions . lensShowScrollbar
       vScrollbarPolicy = showScrollbarToPolicy showScrollbarVal
   scrolledWin <- scrolledWindowNew noAdjustment noAdjustment
   widgetShow scrolledWin
@@ -235,12 +241,25 @@ createNotebookTabLabel = do
   containerAdd box label
   containerAdd box button
   widgetSetCanFocus button False
+  widgetSetFocusOnClick button False
   widgetSetCanFocus label False
+  widgetSetFocusOnClick label False
   widgetSetCanFocus box False
+  widgetSetFocusOnClick box False
   widgetShow box
   widgetShow label
   widgetShow button
   pure (box, label, button)
+
+setShowTabs :: TMConfig -> Notebook -> IO ()
+setShowTabs tmConfig note = do
+  npages <- notebookGetNPages note
+  let shouldShowTabs =
+        case tmConfig ^. lensOptions . lensShowTabBar of
+          ShowTabBarIfNeeded -> npages > 1
+          ShowTabBarAlways   -> True
+          ShowTabBarNever    -> False
+  notebookSetShowTabs note shouldShowTabs
 
 toRGBA :: Colour Double -> IO RGBA
 toRGBA colour = do
@@ -276,29 +295,27 @@ createTerm :: (TMState -> EventKey -> IO Bool) -> TMState -> IO TMTerm
 createTerm handleKeyPress mvarTMState = do
   assertInvariantTMState mvarTMState
   scrolledWin <- createScrolledWin mvarTMState
-  TMState{tmStateFontDesc, tmStateConfig, tmStateNotebook=currNote} <- readMVar mvarTMState
+  TMState{tmStateAppWin, tmStateFontDesc, tmStateConfig, tmStateNotebook=currNote} <-
+    readMVar mvarTMState
   let maybeCurrFocusedTabPid = pid . tmNotebookTabTerm <$> getFLFocusItem (tmNotebookTabs currNote)
   maybeCurrDir <- maybe (pure Nothing) cwdOfPid maybeCurrFocusedTabPid
   vteTerm <- terminalNew
   terminalSetFont vteTerm (Just tmStateFontDesc)
-  terminalSetWordCharExceptions vteTerm $ wordCharExceptions tmStateConfig
-  terminalSetScrollbackLines vteTerm (fromIntegral (scrollbackLen tmStateConfig))
-  let colourConf = colourConfig tmStateConfig
-      mGetRGBA accessor = Just <$> toRGBA (accessor colourConf)
-  terminalSetColorCursor vteTerm =<< mGetRGBA cursorColour
-  join $ terminalSetColors vteTerm
-    <$> mGetRGBA foregroundColour
-    <*> mGetRGBA backgroundColour
-    <*> (Just <$> traverse toRGBA (palette colourConf))
-  terminalSetCursorBlinkMode vteTerm CursorBlinkModeOn
+  let curOpts = options tmStateConfig
+  terminalSetWordCharExceptions vteTerm $ wordCharExceptions curOpts
+  terminalSetScrollbackLines vteTerm (fromIntegral (scrollbackLen curOpts))
+  terminalSetCursorBlinkMode vteTerm (cursorBlinkMode curOpts)
   widgetShow vteTerm
-  widgetGrabFocus $ vteTerm
+  -- Should probably use GI.Vte.Functions.getUserShell, but contrary to its
+  -- documentation it raises an exception rather wrap in Maybe.
+  mShell <- lookupEnv "SHELL"
+  let argv = fromMaybe ["/usr/bin/env", "bash"] (pure <$> mShell)
   terminalProcPid <-
     terminalSpawnSync
       vteTerm
       [PtyFlagsDefault]
       maybeCurrDir
-      ["/usr/bin/env", "bash"]
+      argv
       Nothing
       ([SpawnFlagsDefault] :: [SpawnFlags])
       Nothing
@@ -310,20 +327,20 @@ createTerm handleKeyPress mvarTMState = do
   void $
     onButtonClicked tabCloseButton $
       termClose notebookTab mvarTMState
-  setCurrPageAction <-
+  mvarReturnAction <-
     modifyMVar mvarTMState $ \tmState -> do
       let notebook = tmStateNotebook tmState
           note = tmNotebook notebook
           tabs = tmNotebookTabs notebook
       pageIndex <- notebookAppendPage note scrolledWin (Just tabLabelBox)
       notebookSetTabReorderable note scrolledWin True
+      setShowTabs (tmState ^. lensTMStateConfig) note
       let newTabs = appendFL tabs notebookTab
           newTMState =
             tmState & lensTMStateNotebook . lensTMNotebookTabs .~ newTabs
-          setCurrPageAction = do
-            notebookSetCurrentPage note pageIndex
-      pure (newTMState, setCurrPageAction)
-  setCurrPageAction
+          mvarReturnAction = notebookSetCurrentPage note pageIndex
+      pure (newTMState, mvarReturnAction)
+  mvarReturnAction
   relabelTab (tmNotebook currNote) tabLabel scrolledWin vteTerm
   void $ onTerminalWindowTitleChanged vteTerm $ do
     TMState{tmStateNotebook} <- readMVar mvarTMState
@@ -332,5 +349,8 @@ createTerm handleKeyPress mvarTMState = do
   void $ onWidgetKeyPressEvent vteTerm $ handleKeyPress mvarTMState
   void $ onWidgetKeyPressEvent scrolledWin $ handleKeyPress mvarTMState
   void $ onTerminalChildExited vteTerm $ \_ -> termExit notebookTab mvarTMState
+  widgetGrabFocus vteTerm
+  windowSetFocus tmStateAppWin (Just vteTerm)
   assertInvariantTMState mvarTMState
+  createTermHook (hooks tmStateConfig) mvarTMState vteTerm
   pure tmTerm

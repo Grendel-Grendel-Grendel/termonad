@@ -4,7 +4,7 @@ module Termonad.App where
 import Termonad.Prelude
 
 import Config.Dyre (defaultParams, projectName, realMain, showError, wrapMain)
-import Control.Lens ((&), (^.), (.~))
+import Control.Lens ((&), (.~), (^.), firstOf)
 import GI.Gdk (castTo, managedForeignPtr, screenGetDefault)
 import GI.Gio
   ( ApplicationFlags(ApplicationFlagsFlagsNone)
@@ -70,42 +70,68 @@ import GI.Pango
   , fontDescriptionSetAbsoluteSize
   )
 import GI.Vte
-  ( terminalCopyClipboard
+  ( Terminal
+  , terminalCopyClipboard
   , terminalPasteClipboard
   )
 
 import Paths_termonad (getDataFileName)
-import Termonad.Config
+import Termonad.Lenses
+  ( lensConfirmExit
+  , lensFontConfig
+  , lensOptions
+  , lensShowMenu
+  , lensTMNotebookTabTerm
+  , lensTMNotebookTabs
+  , lensTMStateApp
+  , lensTMStateConfig
+  , lensTMStateNotebook
+  , lensTMStateUserReqExit
+  , lensTerm
+  )
+import Termonad.FocusList (findFL, moveFromToFL, updateFocusFL, focusItemGetter)
+import Termonad.Gtk (appNew, objFromBuildUnsafe)
+import Termonad.Keys (handleKeyPress)
+import Termonad.Term (createTerm, relabelTabs, termExitFocused, setShowTabs)
+import Termonad.Types
   ( FontConfig(fontFamily, fontSize)
   , FontSize(FontSizePoints, FontSizeUnits)
   , TMConfig
-  , lensFontConfig
-  , lensConfirmExit
-  )
-import Termonad.FocusList (findFL, moveFromToFL, updateFocusFL)
-import Termonad.Gtk (appNew, objFromBuildUnsafe)
-import Termonad.Keys (handleKeyPress)
-import Termonad.Term (createTerm, relabelTabs, termExitFocused)
-import Termonad.Types
-  ( TMNotebookTab
+  , TMNotebookTab
   , TMState
   , TMState'(TMState)
   , UserRequestedExit(UserRequestedExit, UserDidNotRequestExit)
-  , getFocusedTermFromState
-  , getUserRequestedExit
-  , lensTMNotebookTabs
-  , lensTMNotebookTabTerm
-  , lensTMStateApp
-  , lensTMStateNotebook
-  , lensTMStateConfig
-  , lensTerm
   , newEmptyTMState
-  , setUserRequestedExit
   , tmNotebookTabTermContainer
   , tmNotebookTabs
   , tmStateNotebook
   )
 import Termonad.XML (interfaceText, menuText)
+
+getFocusedTermFromState :: TMState -> IO (Maybe Terminal)
+getFocusedTermFromState mvarTMState = do
+  withMVar
+    mvarTMState
+    ( pure .
+      firstOf
+        ( lensTMStateNotebook .
+          lensTMNotebookTabs .
+          focusItemGetter .
+          traverse .
+          lensTMNotebookTabTerm .
+          lensTerm
+        )
+    )
+
+setUserRequestedExit :: TMState -> IO ()
+setUserRequestedExit mvarTMState = do
+  modifyMVar_ mvarTMState $ \tmState -> do
+    pure $ tmState & lensTMStateUserReqExit .~ UserRequestedExit
+
+getUserRequestedExit :: TMState -> IO UserRequestedExit
+getUserRequestedExit mvarTMState = do
+  tmState <- readMVar mvarTMState
+  pure $ tmState ^. lensTMStateUserReqExit
 
 setupScreenStyle :: IO ()
 setupScreenStyle = do
@@ -154,7 +180,7 @@ setupScreenStyle = do
 createFontDesc :: TMConfig -> IO FontDescription
 createFontDesc tmConfig = do
   fontDesc <- fontDescriptionNew
-  let fontConf = tmConfig ^. lensFontConfig
+  let fontConf = tmConfig ^. lensOptions . lensFontConfig
   fontDescriptionSetFamily fontDesc (fontFamily fontConf)
   case fontSize fontConf of
     FontSizePoints points ->
@@ -194,7 +220,7 @@ updateFLTabPos mvarTMState oldPos newPos =
 exit :: (ResponseType -> IO a) -> TMState -> IO a
 exit handleResponse mvarTMState = do
   tmState <- readMVar mvarTMState
-  let confirm = tmState ^. lensTMStateConfig ^. lensConfirmExit
+  let confirm = tmState ^. lensTMStateConfig . lensOptions . lensConfirmExit
   handleResponse =<< if confirm
     then exitWithConfirmationDialog mvarTMState
     else pure ResponseTypeYes
@@ -266,6 +292,7 @@ setupTermonad tmConfig app win builder = do
     when (pages == 0) $ do
       setUserRequestedExit mvarTMState
       quit mvarTMState
+    setShowTabs tmConfig note
 
   void $ onNotebookSwitchPage note $ \_ pageNum -> do
     maybeRes <- tryTakeMVar mvarTMState
@@ -342,9 +369,10 @@ setupTermonad tmConfig app win builder = do
   void $ onSimpleActionActivate aboutAction (const $ showAboutDialog app)
   actionMapAddAction app aboutAction
 
-  menuBuilder <- builderNewFromString menuText $ fromIntegral (length menuText)
-  menuModel <- objFromBuildUnsafe menuBuilder "menubar" MenuModel
-  applicationSetMenubar app (Just menuModel)
+  when (tmConfig ^. lensOptions . lensShowMenu) $ do
+    menuBuilder <- builderNewFromString menuText $ fromIntegral (length menuText)
+    menuModel <- objFromBuildUnsafe menuBuilder "menubar" MenuModel
+    applicationSetMenubar app (Just menuModel)
 
   windowSetTitle win "Termonad"
 
@@ -379,6 +407,10 @@ showAboutDialog app = do
 appStartup :: Application -> IO ()
 appStartup _app = pure ()
 
+-- | Run Termonad with the given 'TMConfig'.
+--
+-- Do not perform any of the recompilation operations that the 'defaultMain'
+-- function does.
 start :: TMConfig -> IO ()
 start tmConfig = do
   -- app <- appNew (Just "haskell.termonad") [ApplicationFlagsFlagsNone]
@@ -388,6 +420,62 @@ start tmConfig = do
   void $ onApplicationActivate app (appActivate tmConfig app)
   void $ applicationRun app Nothing
 
+-- | Run Termonad with the given 'TMConfig'.
+--
+-- This function will check if there is a @~/.config/termonad/termonad.hs@ file
+-- and a @~/.cache/termonad/termonad-linux-x86_64@ binary.  Termonad will
+-- perform different actions based on whether or not these two files exist.
+--
+-- Here are the four different possible actions based on the existence of these
+-- two files.
+--
+-- - @~/.config/termonad/termonad.hs@ exists, @~/.cache/termonad/termonad-linux-x86_64@ exists
+--
+--   The timestamps of these two files are checked.  If the
+--   @~/.config/termonad/termonad.hs@ file has been modified after the
+--   @~/.cache/termonad/termonad-linux-x86_64@ binary, then Termonad will use
+--   GHC to recompile the @~/.config/termonad/termonad.hs@ file, producing a
+--   new binary at @~/.cache/termonad/termonad-linux-x86_64@.  This new binary
+--   will be re-executed.  The 'TMConfig' passed to this 'defaultMain' will be
+--   effectively thrown away.
+--
+--   If GHC fails to recompile the @~/.config/termonad/termonad.hs@ file, then
+--   Termonad will just execute 'start' with the 'TMConfig' passed in.
+--
+--   If the @~/.cache/termonad/termonad-linux-x86_64@ binary has been modified
+--   after the @~/.config/termonad/termonad.hs@ file, then Termonad will
+--   re-exec the @~/.cache/termonad/termonad-linux-x86_64@ binary.  The
+--   'TMConfig' passed to this 'defaultMain' will be effectively thrown away.
+--
+-- - @~/.config/termonad/termonad.hs@ exists, @~/.cache/termonad/termonad-linux-x86_64@ does not exist
+--
+--   Termonad will use GHC to recompile the @~/.config/termonad/termonad.hs@
+--   file, producing a new binary at @~/.cache/termonad/termonad-linux-x86_64@.
+--   This new binary will be re-executed.  The 'TMConfig' passed to this
+--   'defaultMain' will be effectively thrown away.
+--
+--   If GHC fails to recompile the @~/.config/termonad/termonad.hs@ file, then
+--   Termonad will just execute 'start' with the 'TMConfig' passed in.
+--
+-- - @~/.config/termonad/termonad.hs@ does not exist, @~/.cache/termonad/termonad-linux-x86_64@ exists
+--
+--   Termonad will ignore the @~/.cache/termonad/termonad-linux-x86_64@ binary
+--   and just run 'start' with the 'TMConfig' passed to this function.
+--
+-- - @~/.config/termonad/termonad.hs@ does not exist, @~/.cache/termonad/termonad-linux-x86_64@ does not exist
+--
+--   Termonad will run 'start' with the 'TMConfig' passed to this function.
+--
+-- Other notes:
+--
+-- 1. That the locations of @~/.config/termonad/termonad.hs@ and
+--    @~/.cache/termonad/termonad-linux-x86_64@ may differ depending on your
+--    system.
+--
+-- 2. In your own @~/.config/termonad/termonad.hs@ file, you can use either
+--    'defaultMain' or 'start'.  As long as you always execute the system-wide
+--    @termonad@ binary (instead of the binary produced as
+--    @~/.cache/termonad/termonad-linux-x86_64@), the effect should be the same.
 defaultMain :: TMConfig -> IO ()
 defaultMain tmConfig = do
   let params =

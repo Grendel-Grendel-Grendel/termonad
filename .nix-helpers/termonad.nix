@@ -1,31 +1,30 @@
-{ mkDerivation, base, Cabal, cabal-doctest, classy-prelude, colour
-, constraints, data-default, doctest, dyre, gi-gdk, gi-gio, gi-glib
-, gi-gtk, gi-pango, gi-vte, gtk3, haskell-gi-base, hedgehog, lens
-, pretty-simple, QuickCheck, stdenv, tasty, tasty-hedgehog
-, template-haskell, xml-conduit, xml-html-qq
+{ mkDerivation, adjunctions, base, Cabal, cabal-doctest
+, classy-prelude, colour, constraints, data-default, directory
+, distributive, doctest, dyre, filepath, genvalidity-hspec, gi-gdk
+, gi-gio, gi-glib, gi-gtk, gi-pango, gi-vte, gtk3, haskell-gi-base
+, hedgehog, lens, pretty-simple, QuickCheck, singletons, stdenv
+, tasty, tasty-hedgehog, tasty-hspec, template-haskell, xml-conduit
+, xml-html-qq
 }:
 mkDerivation {
   pname = "termonad";
   version = "0.2.1.0";
-  src = builtins.filterSource (path: type: with stdenv.lib;
-    ! elem (baseNameOf path) [ ".git" "result" ".stack-work" ] &&
-    ! any (flip hasPrefix (baseNameOf path)) [ "dist" ".ghc" ]
-  ) ./..;
+  src = ./..;
   isLibrary = true;
   isExecutable = true;
-  doCheck = false;
   enableSeparateDataOutput = true;
   setupHaskellDepends = [ base Cabal cabal-doctest ];
   libraryHaskellDepends = [
-    base classy-prelude colour constraints data-default dyre gi-gdk
-    gi-gio gi-glib gi-gtk gi-pango gi-vte haskell-gi-base lens
-    pretty-simple QuickCheck xml-conduit xml-html-qq
+    adjunctions base classy-prelude colour constraints data-default
+    directory distributive dyre filepath gi-gdk gi-gio gi-glib gi-gtk
+    gi-pango gi-vte haskell-gi-base lens pretty-simple QuickCheck
+    singletons xml-conduit xml-html-qq
   ];
   libraryPkgconfigDepends = [ gtk3 ];
   executableHaskellDepends = [ base ];
   testHaskellDepends = [
-    base doctest hedgehog lens QuickCheck tasty tasty-hedgehog
-    template-haskell
+    base doctest genvalidity-hspec hedgehog lens QuickCheck tasty
+    tasty-hedgehog tasty-hspec template-haskell
   ];
   homepage = "https://github.com/cdepillabout/termonad";
   description = "Terminal emulator configurable in Haskell";

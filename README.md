@@ -6,7 +6,9 @@ Termonad
 [![Hackage](https://img.shields.io/hackage/v/termonad.svg)](https://hackage.haskell.org/package/termonad)
 [![Stackage LTS](http://stackage.org/package/termonad/badge/lts)](http://stackage.org/lts/package/termonad)
 [![Stackage Nightly](http://stackage.org/package/termonad/badge/nightly)](http://stackage.org/nightly/package/termonad)
-![BSD3 license](https://img.shields.io/badge/license-BSD3-blue.svg)
+[![BSD3 license](https://img.shields.io/badge/license-BSD3-blue.svg)](./LICENSE)
+[![Join the chat at https://gitter.im/termonad/Lobby](https://badges.gitter.im/termonad/Lobby.svg)](https://gitter.im/termonad/Lobby?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+[![Join the chat in #termonad on irc.freenode.net](https://img.shields.io/badge/%23termonad-irc.freenode.net-brightgreen.svg)](https://webchat.freenode.net/)
 
 Termonad is a terminal emulator configurable in Haskell.  It is extremely
 customizable and provides hooks to modify the default behavior.  It can be
@@ -23,6 +25,9 @@ thought of as the "XMonad" of terminal emulators.
         - [Ubuntu / Debian](#ubuntu--debian)
         - [Nix](#nix)
         - [Mac OS X](#mac-os-x)
+            - [Installing with just `stack`](#installing-with-just-stack)
+            - [Installing with just `nix`](#installing-with-just-nix)
+            - [Installing with `stack` using `nix`](#installing-with-stack-using-nix)
         - [Windows](#windows)
     - [How to use Termonad](#how-to-use-termonad)
         - [Default Keybindings](#default-keybindings)
@@ -31,6 +36,7 @@ thought of as the "XMonad" of terminal emulators.
             - [Running with `stack`](#running-with-stack)
             - [Running with `nix`](#running-with-nix)
     - [Goals](#goals)
+    - [Where to get help](#where-to-get-help)
     - [Contributions](#contributions)
     - [Maintainers](#maintainers)
 
@@ -112,7 +118,59 @@ $ nix-build
 
 ### Mac OS X
 
-(*currently no instructions available.  please send a PR adding instructions if you get termonad to build.*)
+Building and installing Termonad on Mac OS X should be possible with any of the following three methods:
+
+-   Install the required system libraries (like GTK and VTE) by hand, then use
+    `stack` to build Termonad.
+
+    This is probably the easiest method.  You don't have to understand anything
+    about `nix`.  However, it is slightly annoying to have to install GTK and
+    VTE by hand.
+
+-   Use `nix` to install both the required system libraries and Termonad itself.
+
+    If you are a nix user and want an easy way to install Termonad, this
+    is the recommended method.
+
+-   Use `nix` to install install the required system libraries, and `stack` to
+    build Termonad.
+
+    If you are a nix user, but want to use `stack` to actually do development
+    on Termonad, using `stack` may be easier than using `cabal`.
+
+The following sections describe each method.
+
+#### Installing with just `stack`
+
+(*currently no instructions available.  please send a PR adding instructions if you get termonad to build using this method.*)
+
+#### Installing with just `nix`
+
+(*currently no instructions available.  please send a PR adding instructions if you get termonad to build using this method.*)
+
+#### Installing with `stack` using `nix`
+
+`stack` can be used in conjunction with `nix` to install Termonad.  `nix` will
+handle installing system dependencies (like GTK and VTE), while `stack` will
+handle compiling and installing Haskell packages.
+
+You must have `nix` [installed](https://nixos.org/nix/download.html).
+
+You will also need `stack` installed.  You can do that with the following command:
+
+```sh
+$ nix-env -i stack
+```
+
+After `stack` is installed, you will need to clone Termonad and build it:
+
+```
+$ git clone https://github.com/cdepillabout/termonad
+$ cd termonad/
+$ stack --nix install
+```
+
+This will install the `termonad` binary to `~/.local/bin/`.
 
 ### Windows
 
@@ -132,7 +190,7 @@ $ ~/.local/bin/termonad
 
 The following section describes the default keybindings.
 
-If you would like to configure termonad with your own settings, first you will
+If you would like to configure Termonad with your own settings, first you will
 need to create a Haskell file called `~/.config/termonad/termonad.hs`. A following
 section gives an example configuration file.
 
@@ -177,17 +235,29 @@ module Main where
 import Data.Colour.SRGB (Colour, sRGB24)
 import Termonad.App (defaultMain)
 import Termonad.Config
-  ( FontConfig, FontSize(FontSizePoints), ShowScrollbar(ShowScrollbarAlways)
-  , cursorColor, defaultFontConfig, defaultTMConfig, fontConfig, fontFamily
-  , fontSize, showScrollbar
+  ( FontConfig, FontSize(FontSizePoints), Option(Set)
+  , ShowScrollbar(ShowScrollbarAlways), defaultConfigOptions, defaultFontConfig
+  , defaultTMConfig, fontConfig, fontFamily, fontSize, options, showScrollbar
+  )
+import Termonad.Config.Colour
+  (ColourConfig, addColourExtension, createColourExtension, cursorBgColour
+  , defaultColourConfig
   )
 
 -- | This sets the color of the cursor in the terminal.
 --
 -- This uses the "Data.Colour" module to define a dark-red color.
 -- There are many default colors defined in "Data.Colour.Names".
-cursColor :: Colour Double
-cursColor = sRGB24 204 0 0
+cursBgColor :: Colour Double
+cursBgColor = sRGB24 204 0 0
+
+-- | This sets the colors used for the terminal.  We only specify the background
+-- color of the cursor.
+colConf :: ColourConfig (Colour Double)
+colConf =
+  defaultColourConfig
+    { cursorBgColour = Set cursBgColor
+    }
 
 -- | This defines the font for the terminal.
 fontConf :: FontConfig
@@ -199,26 +269,30 @@ fontConf =
 
 main :: IO ()
 main = do
+  colExt <- createColourExtension colConf
   let termonadConf =
         defaultTMConfig
-          { cursorColor = cursColor
-          , fontConfig = fontConf
-          -- Make sure the scrollbar is always visible.
-          , showScrollbar = ShowScrollbarAlways
+          { options =
+              defaultConfigOptions
+                { fontConfig = fontConf
+                  -- Make sure the scrollbar is always visible.
+                , showScrollbar = ShowScrollbarAlways
+                }
           }
+        `addColourExtension` colExt
   defaultMain termonadConf
 ```
 
 ### Compiling Local Settings
 
-If you lauch Termonad by calling `~/.local/bin/termonad`, it will try to
+If you launch Termonad by calling `~/.local/bin/termonad`, it will try to
 compile the `~/.config/termonad/termonad.hs` file if it exists.  The problem is
 that `~/.local/bin/termonad` needs to be able to see GHC and the required
 Haskell libraries to be able to compile `~/.config/termonad/termonad.hs`.
 
 There are a couple solutions to this problem, listed in the sections below.
 
-(These steps are definitely confusing, and I would love to figure out a better
+(These steps are definitely confusing. I would love to figure out a better
 way to do this.  Please submit an issue or PR if you have a good idea about
 how to fix this.)
 
@@ -300,6 +374,16 @@ Termonad has the following goals:
   certain data types or functions do.  If you have a hard time understanding
   anything in the documentation, please submit an issue or PR.
 
+## Where to get help
+
+If you find a bug in Termonad, please either
+[send a PR](https://github.com/cdepillabout/termonad/pulls) fixing it or create
+an [issue](https://github.com/cdepillabout/termonad/issues) explaining it.
+
+If you just need help with configuring Termonad, you can either join the
+[Gitter room](https://gitter.im/termonad/Lobby) or
+[#termonad on irc.freenode.net](https://webchat.freenode.net/).
+
 ## Contributions
 
 Contributions are highly appreciated.  Termonad is currently missing many
@@ -308,4 +392,5 @@ would like to add, please submit an issue or PR.
 
 ## Maintainers
 
-- [Dennis Gosnell](https://github.com/cdepillabout)
+- [cdepillabout](https://github.com/cdepillabout)
+- [LSLeary](https://github.com/LSLeary)
